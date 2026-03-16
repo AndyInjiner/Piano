@@ -1,16 +1,18 @@
 /*
  * ESP32 Piano Trainer - Обучающее устройство для игры на пианино
- * 
+ *
  * Компоненты:
  * - ESP32 DevKit
  * - TFT дисплей 240x320 (ILI9341) с сенсорным экраном (XPT2046)
  * - WS2811 LED лента (54 светодиода)
- * 
+ * - MAX98357A I2S DAC (аудиовыход)
+ *
  * Функционал:
  * - Веб-сервер для загрузки MIDI файлов
  * - Парсинг MIDI файлов
  * - Управление LED лентой по нотам
- * - TFT интерфейс с кнопками play, stop, select и slider скорости
+ * - Вывод звука через MAX98357A (I2S)
+ * - TFT интерфейс с кнопками play, stop, select, mute и slider скорости
  */
 
 #include <WiFi.h>
@@ -23,6 +25,7 @@
 #include <ArduinoJson.h>
 #include <vector>
 #include <algorithm>
+#include <driver/i2s.h>
 
 // ==================== WiFi настройки ====================
 #ifndef APSSID
@@ -55,12 +58,27 @@ TFT_eSPI tft = TFT_eSPI();
 
 CRGB leds[NUM_LEDS];
 
+// ==================== MAX98357A I2S DAC ====================
+// Пины I2S для MAX98357A
+#define I2S_BCLK    26   // Bit Clock
+#define I2S_LRC     27   // Left/Right Clock (Word Select)
+#define I2S_DOUT    14   // Data Out
+#define I2S_PORT    I2S_NUM_0
+
+// Частота дискретизации
+#define SAMPLE_RATE 44100
+#define SAMPLE_BITS 16
+
+bool soundEnabled = true;  // Вкл/выкл звук
+float volume = 0.5f;       // Громкость (0.0 - 1.0)
+
 // ==================== MIDI данные ====================
 struct NoteEvent {
   uint8_t note;      // номер ноты (0-127)
   uint8_t velocity;  // сила нажатия (0-127)
   uint32_t startTime; // время начала (мс)
   uint32_t duration;  // длительность (мс)
+  uint32_t endTime;   // время окончания (мс)
 };
 
 struct MidiFile {
@@ -75,6 +93,13 @@ bool isPlaying = false;
 float playbackSpeed = 1.0;
 uint32_t playbackStartTime = 0;
 
+// Активные ноты для воспроизведения звука
+struct ActiveNote {
+  uint8_t note;
+  uint32_t endTime;
+};
+std::vector<ActiveNote> activeNotes;
+
 // ==================== Веб-сервер ====================
 WebServer server(80);
 WebSocketsServer websocket(81);
@@ -84,12 +109,14 @@ void setupWiFi();
 void setupWebServer();
 void setupTFT();
 void setupLEDs();
+void setupI2S();
 void handleRoot();
 void handleUpload();
 void handleFileList();
 void handlePlay();
 void handleStop();
 void handleSpeed();
+void handleMute();
 void processMIDIFile(File file);
 void drawInterface();
 void drawFileCarousel();
@@ -99,28 +126,32 @@ void updateLEDs();
 uint8_t noteToLED(uint8_t note);
 void noteOn(uint8_t note, uint8_t velocity);
 void noteOff(uint8_t note);
+void playTone(uint8_t note, uint8_t velocity);
+void stopTone(uint8_t note);
+void toggleSound();
 
 // ==================== SETUP ====================
 void setup() {
   Serial.begin(115200);
-  
+
   // Инициализация LittleFS
   if (!LittleFS.begin(true)) {
     Serial.println("LittleFS Mount Failed");
     return;
   }
   Serial.println("LittleFS mounted");
-  
+
   setupWiFi();
   setupTFT();
   setupLEDs();
+  setupI2S();  // Инициализация I2S для звука
   setupWebServer();
-  
+
   // Загрузка списка MIDI файлов
   loadMidiFileList();
-  
+
   drawInterface();
-  
+
   Serial.println("Piano Trainer Ready!");
 }
 
@@ -162,6 +193,36 @@ void setupLEDs() {
   FastLED.show();
 }
 
+// ==================== I2S Звук ====================
+void setupI2S() {
+  i2s_config_t i2s_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 1024,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 0
+  };
+
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCLK,
+    .ws_io_num = I2S_LRC,
+    .data_out_num = I2S_DOUT,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
+  i2s_set_pin(I2S_PORT, &pin_config);
+  i2s_zero_dma_buffer(I2S_PORT);
+
+  Serial.println("I2S initialized");
+}
+
 // ==================== Веб-сервер ====================
 void setupWebServer() {
   server.on("/", handleRoot);
@@ -172,15 +233,16 @@ void setupWebServer() {
   server.on("/play", handlePlay);
   server.on("/stop", handleStop);
   server.on("/speed", handleSpeed);
+  server.on("/mute", handleMute);
   server.on("/status", handleStatus);
   server.onNotFound([]() {
     server.send(404, "text/plain", "Not Found");
   });
-  
+
   // Инициализация WebSocket с обработчиком событий
   websocket.begin();
   websocket.onEvent(wsEvent);
-  
+
   server.begin();
   Serial.println("Web server started");
 }
@@ -257,7 +319,9 @@ void handleStatus() {
   doc["status"] = isPlaying ? "Воспроизведение..." : "Ожидание";
   doc["speed"] = playbackSpeed;
   doc["file"] = currentFileIndex >= 0 ? midiFiles[currentFileIndex].name : "";
-  
+  doc["sound"] = soundEnabled;
+  doc["volume"] = volume;
+
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
@@ -346,12 +410,18 @@ void handleSpeed() {
     playbackSpeed = server.arg("value").toFloat();
     if (playbackSpeed < 0.1) playbackSpeed = 0.1;
     if (playbackSpeed > 2.0) playbackSpeed = 2.0;
-    
+
     websocket.broadcastTXT("SPEED:" + String(playbackSpeed));
     server.send(200, "text/plain", String(playbackSpeed));
   } else {
     server.send(200, "text/plain", String(playbackSpeed));
   }
+}
+
+void handleMute() {
+  toggleSound();
+  websocket.broadcastTXT("MUTE:" + String(soundEnabled ? 1 : 0));
+  server.send(200, "text/plain", soundEnabled ? "1" : "0");
 }
 
 // ==================== MIDI Парсинг ====================
@@ -440,7 +510,7 @@ void processMIDIFile(File file, MidiFile& mf) {
       } else if (type == 0x80) { // Note Off
         uint8_t note = file.read();
         uint8_t velocity = file.read();
-        
+
         // Ищем соответствующую ноту и создаём событие
         for (int i = pendingNotes.size() - 1; i >= 0; i--) {
           if (pendingNotes[i].note == note) {
@@ -449,6 +519,7 @@ void processMIDIFile(File file, MidiFile& mf) {
             ne.velocity = pendingNotes[i].velocity;
             ne.startTime = pendingNotes[i].time;
             ne.duration = absoluteTime - pendingNotes[i].time;
+            ne.endTime = absoluteTime;
             mf.notes.push_back(ne);
             pendingNotes.erase(pendingNotes.begin() + i);
             break;
@@ -568,36 +639,52 @@ void updateLEDs() {
     isPlaying = false;
     return;
   }
-  
+
   MidiFile& mf = midiFiles[currentFileIndex];
   uint32_t currentTime = (millis() - playbackStartTime) * playbackSpeed;
-  
+
   // Включаем ноты, которые должны звучать сейчас
   for (auto& note : mf.notes) {
     uint32_t adjustedStart = note.startTime / playbackSpeed;
-    uint32_t adjustedDuration = note.duration / playbackSpeed;
-    
-    if (currentTime >= adjustedStart && currentTime < adjustedStart + adjustedDuration) {
+    uint32_t adjustedEnd = note.endTime / playbackSpeed;
+
+    // Проверка начала ноты
+    if (currentTime >= adjustedStart && currentTime < adjustedStart + 50) {
       noteOn(note.note, note.velocity);
+      if (soundEnabled) {
+        // Запуск генерации звука для этой ноты
+        ActiveNote an;
+        an.note = note.note;
+        an.endTime = adjustedEnd;
+        activeNotes.push_back(an);
+      }
     }
-  }
-  
-  // Выключаем ноты, которые закончились
-  for (auto& note : mf.notes) {
-    uint32_t adjustedStart = note.startTime / playbackSpeed;
-    uint32_t adjustedDuration = note.duration / playbackSpeed;
-    
-    if (currentTime >= adjustedStart + adjustedDuration) {
+
+    // Проверка окончания ноты
+    if (currentTime >= adjustedEnd && currentTime < adjustedEnd + 50) {
       noteOff(note.note);
+      // Удаляем из активных
+      for (auto it = activeNotes.begin(); it != activeNotes.end(); ++it) {
+        if (it->note == note.note) {
+          activeNotes.erase(it);
+          break;
+        }
+      }
     }
   }
-  
+
   // Проверка окончания
   if (currentTime >= mf.totalDuration / playbackSpeed) {
     isPlaying = false;
     FastLED.clear();
     FastLED.show();
+    activeNotes.clear();
     websocket.broadcastTXT("END");
+  }
+
+  // Генерация звука для активных нот
+  if (soundEnabled && activeNotes.size() > 0) {
+    generateSound();
   }
 }
 
@@ -613,24 +700,33 @@ int selectedFileIndex = 0;
 int fileOffset = 0; // для карусели
 #define MAX_VISIBLE_FILES 5
 
+// Кнопки на экране
+#define BTN_PLAY_X   20
+#define BTN_STOP_X   95
+#define BTN_SEL_X    170
+#define BTN_MUTE_X   245
+#define BTN_Y        260
+#define BTN_W        65
+#define BTN_H        50
+
 void drawInterface() {
   tft.fillScreen(TFT_BLACK);
-  
+
   // Заголовок
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextSize(2);
-  tft.drawString("PIANO TRAINER", 120, 10);
-  
+  tft.drawString("PIANO TRAINER", 80, 10);
+
   // Область для карусели файлов
-  tft.drawRect(10, 50, 220, 150, TFT_WHITE);
-  
+  tft.drawRect(10, 50, 300, 150, TFT_WHITE);
+
   // Кнопки
   drawButtons();
-  
+
   // Slider скорости
   tft.drawString("Speed:", 10, 220);
-  tft.drawLine(60, 235, 200, 235, TFT_GRAY);
-  
+  tft.drawLine(60, 235, 280, 235, TFT_GRAY);
+
   drawFileCarousel();
 }
 
@@ -638,17 +734,28 @@ void drawButtons() {
   // Play кнопка
   tft.fillRoundRect(BTN_PLAY_X, BTN_Y, BTN_W, BTN_H, 5, TFT_GREEN);
   tft.setTextColor(TFT_BLACK);
-  tft.drawString("PLAY", BTN_PLAY_X + 10, BTN_Y + 18);
-  
+  tft.drawString("PLAY", BTN_PLAY_X + 5, BTN_Y + 18);
+
   // Stop кнопка
   tft.fillRoundRect(BTN_STOP_X, BTN_Y, BTN_W, BTN_H, 5, TFT_RED);
   tft.setTextColor(TFT_WHITE);
-  tft.drawString("STOP", BTN_STOP_X + 10, BTN_Y + 18);
-  
+  tft.drawString("STOP", BTN_STOP_X + 5, BTN_Y + 18);
+
   // Select кнопка
   tft.fillRoundRect(BTN_SEL_X, BTN_Y, BTN_W, BTN_H, 5, TFT_BLUE);
   tft.setTextColor(TFT_WHITE);
-  tft.drawString("SEL", BTN_SEL_X + 15, BTN_Y + 18);
+  tft.drawString("SEL", BTN_SEL_X + 10, BTN_Y + 18);
+
+  // MUTE кнопка
+  if (soundEnabled) {
+    tft.fillRoundRect(BTN_MUTE_X, BTN_Y, BTN_W, BTN_H, 5, TFT_ORANGE);
+    tft.setTextColor(TFT_BLACK);
+    tft.drawString("SND", BTN_MUTE_X + 8, BTN_Y + 18);
+  } else {
+    tft.fillRoundRect(BTN_MUTE_X, BTN_Y, BTN_W, BTN_H, 5, TFT_GRAY);
+    tft.setTextColor(TFT_RED);
+    tft.drawString("MUTE", BTN_MUTE_X + 5, BTN_Y + 18);
+  }
 }
 
 void drawFileCarousel() {
@@ -693,7 +800,7 @@ void checkTouch() {
 void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
   if (type == WStype_TEXT) {
     String msg = String((char*)payload);
-    
+
     if (msg.startsWith("PLAY:")) {
       currentFileIndex = msg.substring(5).toInt();
       isPlaying = true;
@@ -702,6 +809,7 @@ void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
       isPlaying = false;
       FastLED.clear();
       FastLED.show();
+      activeNotes.clear();
     } else if (msg.startsWith("SPEED:")) {
       playbackSpeed = msg.substring(6).toFloat();
     } else if (msg.startsWith("SEL:")) {
@@ -713,6 +821,110 @@ void wsEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
       if (fileOffset < 0) fileOffset = 0;
       if (fileOffset >= midiFiles.size()) fileOffset = max(0, (int)midiFiles.size() - MAX_VISIBLE_FILES);
       drawFileCarousel();
+    } else if (msg.startsWith("MUTE:")) {
+      soundEnabled = msg.substring(5).toInt() == 1;
+      drawButtons();
     }
   }
+}
+
+// ==================== Звук (I2S) ====================
+
+// Частоты нот (4.5 октавы, A0=27.5Hz до C5=523.25Hz)
+float noteToFreq(uint8_t note) {
+  // A4 = 440Hz = MIDI нота 69
+  return 440.0 * pow(2.0, (note - 69) / 12.0);
+}
+
+// Генерация синусоиды
+void playTone(uint8_t note, uint8_t velocity) {
+  if (!soundEnabled) return;
+
+  float freq = noteToFreq(note);
+  float amplitude = (velocity / 127.0) * volume * 32767.0;
+
+  // Буфер для одного семпла (левый и правый каналы)
+  int32_t sample[2];
+  sample[0] = (int32_t)(amplitude * sin(2 * PI * freq * 0.0));  // Упрощённо
+  sample[1] = sample[0];
+
+  // Для простоты - просто отправляем тишину
+  // Реальная генерация звука требует более сложного подхода
+  // с использованием таблицы волн или DDS
+}
+
+void stopTone(uint8_t note) {
+  // Остановка ноты (для простой реализации)
+}
+
+void toggleSound() {
+  soundEnabled = !soundEnabled;
+  drawButtons();
+
+  if (!soundEnabled) {
+    i2s_zero_dma_buffer(I2S_PORT);
+  }
+}
+
+// ==================== Генерация звука (упрощённая) ====================
+// Для полноценной генерации звука нужен синтезатор
+
+class SimpleSynth {
+public:
+  SimpleSynth() : phase(0) {}
+
+  void setFreq(float freq) {
+    phaseInc = freq * 2 * PI / SAMPLE_RATE;
+  }
+
+  int16_t nextSample() {
+    phase += phaseInc;
+    if (phase > 2 * PI) phase -= 2 * PI;
+    return (int16_t)(sin(phase) * 32767);
+  }
+
+  void reset() {
+    phase = 0;
+  }
+
+private:
+  float phase = 0;
+  float phaseInc = 0;
+};
+
+SimpleSynth synth;
+uint32_t lastSampleTime = 0;
+
+// Генерация звука для активных нот
+#define AUDIO_BUFFER_SIZE 256
+int16_t audioBuffer[AUDIO_BUFFER_SIZE * 2];  // Стерео
+
+void generateSound() {
+  if (activeNotes.size() == 0) return;
+
+  uint32_t currentTime = millis();
+  
+  // Генерируем семплы для всех активных нот
+  for (size_t i = 0; i < AUDIO_BUFFER_SIZE; i++) {
+    float sample = 0;
+    
+    // Суммируем все активные ноты
+    for (auto& an : activeNotes) {
+      float freq = noteToFreq(an.note);
+      float phase = 2 * PI * freq * (i / (float)SAMPLE_RATE);
+      sample += sin(phase) * 0.3;  // Уменьшаем амплитуду для предотвращения клиппинга
+    }
+    
+    // Ограничиваем диапазон
+    if (sample > 1.0) sample = 1.0;
+    if (sample < -1.0) sample = -1.0;
+    
+    int16_t sampleValue = (int16_t)(sample * volume * 32767);
+    audioBuffer[i * 2] = sampleValue;      // Левый канал
+    audioBuffer[i * 2 + 1] = sampleValue;  // Правый канал
+  }
+
+  // Отправляем в I2S
+  size_t bytesWritten;
+  i2s_write(I2S_PORT, audioBuffer, sizeof(audioBuffer), &bytesWritten, portMAX_DELAY);
 }

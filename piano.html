@@ -67,6 +67,9 @@ h1 {
 .btn-stop:hover { background: #cc0000; }
 .btn-select { background: #4444ff; }
 .btn-select:hover { background: #6666ff; }
+.btn-mute { background: #ff8800; }
+.btn-mute:hover { background: #ffaa00; }
+.btn-mute.muted { background: #666666; color: #ff0000; }
 .file-list {
   max-height: 300px;
   overflow-y: auto;
@@ -221,8 +224,9 @@ input[type="range"]::-webkit-slider-thumb {
       <button class="btn btn-select" onclick="selectFile()">📋 Выбрать</button>
       <button class="btn btn-play" onclick="playFile()">▶ PLAY</button>
       <button class="btn btn-stop" onclick="stopFile()">⏹ STOP</button>
+      <button class="btn btn-mute" id="btnMute" onclick="toggleMute()">🔊 SND</button>
     </div>
-    
+
     <div class="slider-container">
       <label>Скорость: <span id="speedValue">1.0</span>x</label>
       <input type="range" id="speedSlider" min="10" max="200" value="100" oninput="setSpeed(this.value/100)">
@@ -247,6 +251,7 @@ let files = [];
 let selectedIndex = 0;
 let isPlaying = false;
 let speed = 1.0;
+let soundEnabled = true;  // Состояние звука
 let ws = null;
 
 // Инициализация
@@ -255,6 +260,7 @@ document.addEventListener('DOMContentLoaded', () => {
   createPianoPreview();
   connectWebSocket();
   updateStatus();
+  updateMuteButton();  // Обновить кнопку MUTE
 });
 
 // Загрузка списка файлов
@@ -343,11 +349,34 @@ function stopFile() {
 function setSpeed(val) {
   speed = val;
   document.getElementById('speedValue').textContent = speed.toFixed(1);
-  
+
   fetch(`/speed?value=${speed}`)
     .catch(err => console.error(err));
-  
+
   updateStatus();
+}
+
+function toggleMute() {
+  fetch('/mute')
+    .then(r => r.text())
+    .then(data => {
+      soundEnabled = data === '1';
+      updateMuteButton();
+    })
+    .catch(err => console.error(err));
+}
+
+function updateMuteButton() {
+  const btn = document.getElementById('btnMute');
+  if (btn) {
+    if (soundEnabled) {
+      btn.textContent = '🔊 SND';
+      btn.classList.remove('muted');
+    } else {
+      btn.textContent = '🔇 MUTE';
+      btn.classList.add('muted');
+    }
+  }
 }
 
 function uploadFile(file) {
@@ -379,6 +408,10 @@ function updateStatus() {
     .then(data => {
       document.getElementById('statusText').textContent = data.status || 'Ожидание...';
       document.getElementById('speedText').textContent = `Скорость: ${data.speed || 1.0}x`;
+      if (data.sound !== undefined) {
+        soundEnabled = data.sound;
+        updateMuteButton();
+      }
     })
     .catch(() => {
       // Игнорируем ошибки
@@ -391,7 +424,7 @@ function connectWebSocket() {
   
   ws.onmessage = (event) => {
     const msg = event.data;
-    
+
     if (msg.startsWith('PLAY:')) {
       isPlaying = true;
       document.getElementById('statusBar').classList.add('playing');
@@ -403,6 +436,9 @@ function connectWebSocket() {
       speed = parseFloat(msg.substring(6));
       document.getElementById('speedSlider').value = speed * 100;
       document.getElementById('speedValue').textContent = speed.toFixed(1);
+    } else if (msg.startsWith('MUTE:')) {
+      soundEnabled = msg.substring(5) === '1';
+      updateMuteButton();
     } else if (msg === 'END') {
       isPlaying = false;
       document.getElementById('statusBar').classList.remove('playing');
