@@ -1,0 +1,26 @@
+# Arduino IDE
+*.tmp
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Android build files
+android/.gradle/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties
+
+# Compiled files
+*.o
+*.d
+*.elf
+*.bin
+*.exe
+*.map
+
+# Secrets
+secrets.h
+wifi_config.h

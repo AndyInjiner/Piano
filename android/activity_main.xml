@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="#1a1a2e">
+
+    <!-- Заголовок -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🎹 Piano Trainer"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:textColor="#00d9ff"
+        android:gravity="center"
+        android:layout_marginBottom="16dp" />
+
+    <!-- Статус -->
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Подключение..."
+        android:textColor="#ffffff"
+        android:textSize="14sp"
+        android:background="#3300d9ff"
+        android:padding="8dp"
+        android:layout_marginBottom="8dp" />
+
+    <!-- Список файлов -->
+    <TextView
+        android:id="@+id/tvFiles"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Файлов: 0"
+        android:textColor="#aaaaaa"
+        android:textSize="12sp"
+        android:layout_marginBottom="8dp" />
+
+    <Spinner
+        android:id="@+id/spinnerFiles"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#333333"
+        android:padding="8dp"
+        android:layout_marginBottom="16dp" />
+
+    <!-- Кнопка загрузки -->
+    <Button
+        android:id="@+id/btnUpload"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📁 Загрузить MIDI файл"
+        android:textSize="16sp"
+        android:backgroundTint="#00d9ff"
+        android:layout_marginBottom="8dp" />
+
+    <!-- Кнопка выбора -->
+    <Button
+        android:id="@+id/btnSelect"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="📋 Выбрать файл"
+        android:textSize="16sp"
+        android:backgroundTint="#4444ff"
+        android:layout_marginBottom="8dp" />
+
+    <!-- Кнопки Play/Stop -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginBottom="16dp">
+
+        <Button
+            android:id="@+id/btnPlay"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="▶ PLAY"
+            android:textSize="18sp"
+            android:backgroundTint="#00aa00"
+            android:layout_marginEnd="8dp" />
+
+        <Button
+            android:id="@+id/btnStop"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="⏹ STOP"
+            android:textSize="18sp"
+            android:backgroundTint="#aa0000" />
+
+    </LinearLayout>
+
+    <!-- Slider скорости -->
+    <TextView
+        android:id="@+id/tvSpeed"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Speed: 1.0x"
+        android:textColor="#ffffff"
+        android:textSize="16sp"
+        android:layout_marginBottom="8dp" />
+
+    <SeekBar
+        android:id="@+id/sliderSpeed"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:max="200"
+        android:progress="100" />
+
+    <!-- Информация -->
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="💡 Конвертируйте MP3 в MIDI через basicpitch.spotify.com"
+        android:textColor="#888888"
+        android:textSize="12sp"
+        android:layout_marginTop="16dp"
+        android:gravity="center" />
+
+</LinearLayout>
