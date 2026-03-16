@@ -26,6 +26,7 @@
 #include <vector>
 #include <algorithm>
 #include <driver/i2s.h>
+#include <Preferences.h>
 
 // ==================== WiFi настройки ====================
 #ifndef APSSID
@@ -71,6 +72,9 @@ CRGB leds[NUM_LEDS];
 
 bool soundEnabled = true;  // Вкл/выкл звук
 float volume = 0.5f;       // Громкость (0.0 - 1.0)
+
+// Preferences для сохранения настроек
+Preferences preferences;
 
 // ==================== MIDI данные ====================
 struct NoteEvent {
@@ -129,6 +133,8 @@ void noteOff(uint8_t note);
 void playTone(uint8_t note, uint8_t velocity);
 void stopTone(uint8_t note);
 void toggleSound();
+void saveSettings();
+void loadSettings();
 
 // ==================== SETUP ====================
 void setup() {
@@ -140,6 +146,9 @@ void setup() {
     return;
   }
   Serial.println("LittleFS mounted");
+
+  // Загрузка сохранённых настроек
+  loadSettings();
 
   setupWiFi();
   setupTFT();
@@ -387,9 +396,10 @@ void handlePlay() {
       isPlaying = true;
       playbackStartTime = millis();
       playbackSpeed = 1.0;
-      
+
       websocket.broadcastTXT("PLAY:" + String(currentFileIndex));
       server.send(200, "text/plain", midiFiles[currentFileIndex].name);
+      saveSettings();  // Сохраняем последний выбранный файл
       return;
     }
   }
@@ -413,6 +423,7 @@ void handleSpeed() {
 
     websocket.broadcastTXT("SPEED:" + String(playbackSpeed));
     server.send(200, "text/plain", String(playbackSpeed));
+    saveSettings();  // Сохраняем настройки
   } else {
     server.send(200, "text/plain", String(playbackSpeed));
   }
@@ -860,10 +871,35 @@ void stopTone(uint8_t note) {
 void toggleSound() {
   soundEnabled = !soundEnabled;
   drawButtons();
+  saveSettings();  // Сохраняем настройки
 
   if (!soundEnabled) {
     i2s_zero_dma_buffer(I2S_PORT);
   }
+}
+
+// ==================== Сохранение настроек (Preferences) ====================
+
+void saveSettings() {
+  preferences.begin("piano", false);
+  preferences.putFloat("speed", playbackSpeed);
+  preferences.putBool("mute", !soundEnabled);
+  preferences.putFloat("volume", volume);
+  preferences.putInt("lastFile", currentFileIndex);
+  preferences.end();
+  Serial.println("Settings saved");
+}
+
+void loadSettings() {
+  preferences.begin("piano", false);
+  playbackSpeed = preferences.getFloat("speed", 1.0);
+  soundEnabled = !preferences.getBool("mute", false);
+  volume = preferences.getFloat("volume", 0.5f);
+  currentFileIndex = preferences.getInt("lastFile", 0);
+  preferences.end();
+  
+  Serial.printf("Settings loaded: speed=%.1f, mute=%d, volume=%.1f, lastFile=%d\n",
+                playbackSpeed, !soundEnabled, volume, currentFileIndex);
 }
 
 // ==================== Генерация звука (упрощённая) ====================
